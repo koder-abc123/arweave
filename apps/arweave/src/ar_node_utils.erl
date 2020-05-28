@@ -286,14 +286,14 @@ integrate_new_block(
 			txs := TXs,
 			block_index := BI,
 			block_txs_pairs := BlockTXPairs,
-			weave_size := WeaveSize,
-			block_height_hash := BlockHeightHash
+			weave_size := WeaveSize
 		} = StateIn,
 		NewB,
 		BlockTXs) ->
 	NewBI = update_block_index(NewB#block{ txs = BlockTXs }, BI),
 	SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(BlockTXs),
 	ar_data_sync:add_block(SizeTaggedTXs, lists:sublist(NewBI, ?TRACK_CONFIRMATIONS), WeaveSize),
+	ar_downloader:store_height_hash_index(NewB),
 	ar_storage:write_full_block(NewB, BlockTXs),
 	BH = NewB#block.indep_hash,
 	NewBlockTXPairs = update_block_txs_pairs(BH, SizeTaggedTXs, BlockTXPairs),
@@ -333,17 +333,16 @@ integrate_new_block(
 	),
 	BH = element(1, hd(NewBI)),
 	reset_miner(StateIn#{
-		block_index       => NewBI,
-		current           => BH,
-		txs               => ValidTXs,
-		height            => NewB#block.height,
-		reward_pool       => NewB#block.reward_pool,
-		diff              => NewB#block.diff,
-		last_retarget     => NewB#block.last_retarget,
-		weave_size        => NewB#block.weave_size,
-		block_txs_pairs   => NewBlockTXPairs,
-		mempool_size      => calculate_mempool_size(ValidTXs),
-		block_height_hash => gb_sets:add({NewB#block.height, NewB#block.indep_hash}, BlockHeightHash)
+		block_index      => NewBI,
+		current          => BH,
+		txs              => ValidTXs,
+		height           => NewB#block.height,
+		reward_pool      => NewB#block.reward_pool,
+		diff             => NewB#block.diff,
+		last_retarget    => NewB#block.last_retarget,
+		weave_size       => NewB#block.weave_size,
+		block_txs_pairs  => NewBlockTXPairs,
+		mempool_size     => calculate_mempool_size(ValidTXs)
 	}).
 
 update_block_index(B, BI) ->
