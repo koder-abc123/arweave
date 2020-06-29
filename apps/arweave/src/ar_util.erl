@@ -77,7 +77,7 @@ height_from_hashes(BI) ->
 	(get_head_block(BI))#block.height.
 
 %% @doc Get a wallet list from a hash list.
-wallets_from_hashes(not_joined) -> [];
+wallets_from_hashes(not_joined) -> ar_patricia_tree:new();
 wallets_from_hashes(BI) ->
 	(get_head_block(BI))#block.wallet_list.
 

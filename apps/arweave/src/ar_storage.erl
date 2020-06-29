@@ -474,13 +474,14 @@ write_block_index(BI) ->
 %% Write a block hash list to disk for retreival later.
 write_wallet_list(B) ->
 	WalletList = B#block.wallet_list,
-	ID = case B#block.wallet_list_hash of
+	RewardAddr = B#block.reward_addr,
+	{ID, _} = case B#block.wallet_list_hash of
 		not_set ->
-			ar_block:hash_wallet_list(B#block.height, B#block.reward_addr, WalletList);
+			ar_block:hash_wallet_list(B#block.height, RewardAddr, WalletList);
 		WalletListHash ->
-			WalletListHash
+			{WalletListHash, no_wallet_list}
 	end,
-	JSON = ar_serialize:jsonify(ar_serialize:wallet_list_to_json_struct(WalletList)),
+	JSON = ar_serialize:jsonify(ar_serialize:wallet_list_to_json_struct(RewardAddr, WalletList)),
 	write_file_atomic(wallet_list_filepath(ID), JSON),
 	ok.
 
@@ -499,16 +500,16 @@ read_block_index() ->
 	end.
 
 %% @doc Read a given wallet list (by hash) from the disk.
-read_wallet_list([]) -> {ok, []};
-read_wallet_list(WL = [{_, _, _} | _]) -> {ok, WL};
-read_wallet_list(WalletListHash) ->
+read_wallet_list(WalletListHash) when is_binary(WalletListHash) ->
 	Filename = wallet_list_filepath(WalletListHash),
 	case file:read_file(Filename) of
 		{ok, JSON} ->
 			parse_wallet_list_json(JSON);
 		{error, Reason} ->
 			{error, {failed_reading_file, Filename, Reason}}
-	end.
+	end;
+read_wallet_list(WL) when is_list(WL) ->
+	{ok, ar_patricia_tree:from_proplist([{A, W} || {A, _, _} = W <- WL])}.
 
 parse_wallet_list_json(JSON) ->
 	case ar_serialize:json_decode(JSON) of
@@ -776,8 +777,13 @@ store_and_retrieve_wallet_list_test() ->
 	write_wallet_list(B0),
 	Height = B0#block.height,
 	RewardAddr = B0#block.reward_addr,
-	WL = B0#block.wallet_list,
-	?assertEqual({ok, WL}, read_wallet_list(ar_block:hash_wallet_list(Height, RewardAddr, WL))).
+	ExpectedWL = B0#block.wallet_list,
+	{WalletListHash, _} = ar_block:hash_wallet_list(Height, RewardAddr, ExpectedWL),
+	{ok, ActualWL} = read_wallet_list(WalletListHash),
+	?assertEqual(
+		ar_patricia_tree:foldr(fun(El, Acc) -> [El | Acc] end, [], ExpectedWL),
+		ar_patricia_tree:foldr(fun(El, Acc) -> [El | Acc] end, [], ActualWL)
+	).
 
 handle_corrupted_wallet_list_test() ->
 	ar_storage:clear(),
@@ -789,6 +795,6 @@ handle_corrupted_wallet_list_test() ->
 		B0#block{ hash_list = unset },
 		read_block(B0#block.indep_hash, ar_weave:generate_block_index([B0]))
 	),
-	WalletListHash = ar_block:hash_wallet_list(Height, RewardAddr, B0#block.wallet_list),
+	{WalletListHash, _} = ar_block:hash_wallet_list(Height, RewardAddr, B0#block.wallet_list),
 	ok = file:write_file(wallet_list_filepath(WalletListHash), <<>>),
 	?assertEqual(unavailable, read_block(B0#block.indep_hash, ar_weave:generate_block_index([B0]))).

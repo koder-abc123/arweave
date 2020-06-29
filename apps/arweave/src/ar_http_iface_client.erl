@@ -4,7 +4,7 @@
 
 -module(ar_http_iface_client).
 
--export([send_new_block/3, send_new_tx/2, get_block/2]).
+-export([send_new_block/3, send_new_tx/2, get_block/2, get_block/3]).
 -export([get_block_shadow/2]).
 -export([get_tx/3, get_txs/3, get_tx_from_remote_peer/2, get_tx_data/2]).
 -export([add_peer/1]).
@@ -101,12 +101,15 @@ add_peer(Peer) ->
 	}).
 
 %% @doc Retreive a block by hash from disk or a remote peer.
-get_block(Peers, H) when is_list(Peers) ->
+get_block(Peers, H) ->
+	get_block(Peers, H, []).
+
+get_block(Peers, H, Opts) when is_list(Peers) ->
 	case ar_storage:read_block(H) of
 		unavailable ->
-			get_block_from_remote_peers(Peers, H);
+			get_block_from_remote_peers(Peers, H, Opts);
 		B ->
-			case catch reconstruct_full_block(Peers, B) of
+			case catch reconstruct_full_block(Peers, B, Opts) of
 				{'EXIT', Reason} ->
 					ar:info([
 						{event, failed_to_construct_full_block_from_shadow},
@@ -117,12 +120,12 @@ get_block(Peers, H) when is_list(Peers) ->
 					Handled
 			end
 	end;
-get_block(Peer, H) ->
-	get_block([Peer], H).
+get_block(Peer, H, Opts) ->
+	get_block([Peer], H, Opts).
 
-get_block_from_remote_peers([], _H) ->
+get_block_from_remote_peers([], _H, _Opts) ->
 	unavailable;
-get_block_from_remote_peers(Peers = [_ | _], H) ->
+get_block_from_remote_peers(Peers = [_ | _], H, Opts) ->
 	Peer = lists:nth(rand:uniform(min(5, length(Peers))), Peers),
 	case handle_block_response(
 		Peer,
@@ -136,12 +139,13 @@ get_block_from_remote_peers(Peers = [_ | _], H) ->
 			timeout => 30 * 1000,
 			limit => ?MAX_BODY_SIZE
 		}),
-		full_block
+		full_block,
+		Opts
 	) of
 		unavailable ->
-			get_block_from_remote_peers(Peers -- [Peer], H);
+			get_block_from_remote_peers(Peers -- [Peer], H, Opts);
 		not_found ->
-			get_block_from_remote_peers(Peers -- [Peer], H);
+			get_block_from_remote_peers(Peers -- [Peer], H, Opts);
 		B ->
 			B
 	end.
@@ -171,7 +175,8 @@ get_block_shadow(Peers, ID) ->
 			timeout => 30 * 1000,
 			limit => ?MAX_BODY_SIZE
 		}),
-		block_shadow
+		block_shadow,
+		[]
 	) of
 		unavailable ->
 			get_block_shadow(Peers -- [Peer], ID);
@@ -492,11 +497,11 @@ process_get_info(Props) ->
 	end.
 
 %% @doc Process the response of an /block call.
-handle_block_response(_, _, {error, _}, _) -> unavailable;
-handle_block_response(_, _, {ok, {{<<"400">>, _}, _, _, _, _}}, _) -> unavailable;
-handle_block_response(_, _, {ok, {{<<"404">>, _}, _, _, _, _}}, _) -> not_found;
-handle_block_response(_, _, {ok, {{<<"500">>, _}, _, _, _, _}}, _) -> unavailable;
-handle_block_response(Peer, _Peers, {ok, {{<<"200">>, _}, _, Body, _, _}}, block_shadow) ->
+handle_block_response(_, _, {error, _}, _, _) -> unavailable;
+handle_block_response(_, _, {ok, {{<<"400">>, _}, _, _, _, _}}, _, _) -> unavailable;
+handle_block_response(_, _, {ok, {{<<"404">>, _}, _, _, _, _}}, _, _) -> not_found;
+handle_block_response(_, _, {ok, {{<<"500">>, _}, _, _, _, _}}, _, _) -> unavailable;
+handle_block_response(Peer, _Peers, {ok, {{<<"200">>, _}, _, Body, _, _}}, block_shadow, _) ->
 	case catch ar_serialize:json_struct_to_block(Body) of
 		{'EXIT', Reason} ->
 			ar:info([
@@ -515,8 +520,8 @@ handle_block_response(Peer, _Peers, {ok, {{<<"200">>, _}, _, Body, _, _}}, block
 			]),
 			unavailable
 	end;
-handle_block_response(Peer, Peers, {ok, {{<<"200">>, _}, _, Body, _, _}}, full_block) ->
-	case catch reconstruct_full_block(Peers, Body) of
+handle_block_response(Peer, Peers, {ok, {{<<"200">>, _}, _, Body, _, _}}, full_block, Opts) ->
+	case catch reconstruct_full_block(Peers, Body, Opts) of
 		{'EXIT', Reason} ->
 			ar:info([
 				"Failed to parse block response.",
@@ -527,32 +532,40 @@ handle_block_response(Peer, Peers, {ok, {{<<"200">>, _}, _, Body, _, _}}, full_b
 		Handled ->
 			Handled
 	end;
-handle_block_response(_, _, Response, _) ->
+handle_block_response(_, _, Response, _, _) ->
 	ar:warn([{unexpected_block_response, Response}]),
 	unavailable.
 
-reconstruct_full_block(Peers, Body) when is_binary(Body) ->
+reconstruct_full_block(Peers, Body, Opts) when is_binary(Body) ->
 	case ar_serialize:json_struct_to_block(Body) of
 		B when is_record(B, block) ->
-			reconstruct_full_block(Peers, B);
+			reconstruct_full_block(Peers, B, Opts);
 		B ->
 			B
 	end;
-reconstruct_full_block(Peers, B) when is_record(B, block) ->
+reconstruct_full_block(Peers, B, Opts) when is_record(B, block) ->
 	WalletList =
-		case B#block.wallet_list of
-			WL when is_list(WL) -> WL;
-			WL when is_binary(WL) ->
-				case ar_storage:read_wallet_list(WL) of
-					{ok, ReadWL} ->
-						ReadWL;
-					{error, _} ->
-						get_wallet_list(Peers, B#block.indep_hash)
+		case lists:member(no_wallet_list, Opts) of
+			true ->
+				not_set;
+			false ->
+				case B#block.wallet_list of
+					WL when is_list(WL) ->
+						ar_patricia_tree:from_proplist([{A, W} || {A, _, _} = W <- WL]);
+					WL when is_binary(WL) ->
+						case ar_storage:read_wallet_list(WL) of
+							{ok, ReadWL} ->
+								ReadWL;
+							{error, _} ->
+								get_wallet_list(Peers, B#block.indep_hash)
+						end;
+					WL ->
+						WL
 				end
 		end,
 	MempoolTXs = ar_node:get_pending_txs(whereis(http_entrypoint_node), [as_map]),
 	case {get_txs(Peers, MempoolTXs, B), WalletList} of
-		{{ok, TXs}, MaybeWalletList} when is_list(MaybeWalletList) ->
+		{{ok, TXs}, MaybeWalletList} when MaybeWalletList /= not_found ->
 			B#block {
 				txs = TXs,
 				wallet_list = WalletList

@@ -154,10 +154,11 @@ verify_block_txs_test() ->
 			title := Title,
 			txs := TXs,
 			height := Height,
-			wallet_list := WalletList,
+			wallet_list := WL,
 			block_txs_pairs := BlockTXPairs,
 			expected_result := ExpectedResult
 		}) ->
+			WalletList = ar_patricia_tree:from_proplist([{A, W} || {A, _, _} = W <- WL]),
 			?assertEqual(
 				ExpectedResult,
 				ar_tx_replay_pool:verify_block_txs(

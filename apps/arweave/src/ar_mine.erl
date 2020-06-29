@@ -187,10 +187,10 @@ update_txs(
 	AppliedTXsWalletList =
 			ar_node_utils:apply_txs(CurrentB#block.wallet_list, ValidTXs, CurrentB#block.height),
 	RewardWalletBeforeMiningReward =
-		case lists:keytake(RewardAddr, 1, AppliedTXsWalletList) of
-			false ->
+		case ar_patricia_tree:get(RewardAddr, AppliedTXsWalletList) of
+			not_found ->
 				not_in_the_list;
-			{value, W, _} ->
+			W ->
 				W
 		end,
 	NewWalletList =
@@ -208,7 +208,12 @@ update_txs(
 		wallet_list = NewWalletList
 	},
 	{_RW, NoRewardWLH} =
-		ar_block:hash_wallet_list_without_reward_wallet(RewardAddr, NewWalletList),
+		case CurrentB#block.height + 1 >= ar_fork:height_2_2() of
+			true ->
+				{not_reward_wallet, not_set};
+			false ->
+				ar_block:hash_wallet_list_without_reward_wallet(RewardAddr, NewWalletList)
+		end,
 	BDSBase = ar_block:generate_block_data_segment_base(NewCandidateB),
 	update_data_segment(
 		S#state{
@@ -309,18 +314,30 @@ update_data_segment(S, BlockTimestamp, Diff) ->
 		),
 	WL = case RewardWalletBeforeMiningReward of
 		not_in_the_list ->
-			[];
+			ar_patricia_tree:new();
 		_ ->
-			[RewardWalletBeforeMiningReward]
+			ar_patricia_tree:from_proplist(
+				[{element(1, RewardWalletBeforeMiningReward), RewardWalletBeforeMiningReward}]
+			)
 	end,
 	NewRewardWallet =
-		case ar_node_utils:apply_mining_reward(WL, RewardAddr, FinderReward, Height) of
-			[RW] ->
-				RW;
-			[] ->
-				unclaimed
+		case ar_patricia_tree:get(
+			RewardAddr,
+			ar_node_utils:apply_mining_reward(WL, RewardAddr, FinderReward, Height)
+		) of
+			not_found ->
+				unclaimed;
+			RW ->
+				RW
 		end,
-	WalletListHash = ar_block:hash_wallet_list(NewRewardWallet, NoRewardWalletListHash),
+	WalletList = CandidateB#block.wallet_list,
+	{WalletListHash, NewWalletList} =
+		case Height >= ar_fork:height_2_2() of
+			true ->
+				ar_block:hash_wallet_list(Height, RewardAddr, WalletList);
+			false ->
+				{ar_block:hash_wallet_list(NewRewardWallet, NoRewardWalletListHash), WalletList}
+		end,
 	CDiff = ar_difficulty:next_cumulative_diff(
 		CurrentB#block.cumulative_diff,
 		Diff,
@@ -348,7 +365,8 @@ update_data_segment(S, BlockTimestamp, Diff) ->
 		diff = Diff,
 		cumulative_diff = CDiff,
 		reward_pool = RewardPool,
-		wallet_list_hash = WalletListHash
+		wallet_list_hash = WalletListHash,
+		wallet_list = NewWalletList
 	},
 	NewS = S#state {
 		timestamp = BlockTimestamp,
@@ -472,11 +490,10 @@ process_solution(S, Hash, Nonce, MinedTXs, Diff, Timestamp) ->
 		unclaimed ->
 			CandidateB#block.wallet_list;
 		_ ->
-			lists:keyreplace(
+			ar_patricia_tree:insert(
 				RewardAddr,
-				1,
-				CandidateB#block.wallet_list,
-				RewardWallet
+				RewardWallet,
+				CandidateB#block.wallet_list
 			)
 	end,
 	NewBBeforeHash = CandidateB#block{

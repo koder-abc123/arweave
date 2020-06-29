@@ -26,14 +26,15 @@ init(WalletList) -> init(WalletList, ar_mine:genesis_difficulty()).
 init(WalletList, Diff) -> init(WalletList, Diff, 0).
 init(WalletList, StartingDiff, RewardPool) ->
 	ar_randomx_state:reset(),
+	WL = ar_patricia_tree:from_proplist([{A, W} || {A, _, _} = W <- WalletList]),
 	B0 =
 		#block{
 			height = 0,
 			hash = crypto:strong_rand_bytes(32),
 			nonce = crypto:strong_rand_bytes(32),
 			txs = [],
-			wallet_list = WalletList,
-			wallet_list_hash = ar_block:hash_wallet_list(0, unclaimed, WalletList),
+			wallet_list = WL,
+			wallet_list_hash = element(1, ar_block:hash_wallet_list(0, unclaimed, WL)),
 			hash_list = [],
 			diff = StartingDiff,
 			weave_size = 0,
@@ -156,7 +157,8 @@ add([CurrentB | _Bs], RawTXs, BI, RewardAddr, RewardPool, WalletList, Tags, POA,
 			hash_list = ?BI_TO_BHL(lists:sublist(BI, ?STORE_BLOCKS_BEHIND_CURRENT)),
 			hash_list_merkle = MR,
 			wallet_list = WalletList,
-			wallet_list_hash = ar_block:hash_wallet_list(NewHeight, RewardAddr, WalletList),
+			wallet_list_hash =
+				element(1, ar_block:hash_wallet_list(NewHeight, RewardAddr, WalletList)),
 			reward_addr = RewardAddr,
 			tags = Tags,
 			reward_pool = RewardPool,
@@ -291,16 +293,17 @@ indep_hash_pre_fork_2_0(#block {
 					{txs, lists:map(EncodeTX, TXs)},
 					{hash_list, lists:map(fun ar_util:encode/1, HL)},
 					{wallet_list,
-						lists:map(
-							fun({Wallet, Qty, Last}) ->
-								{
+						ar_patricia_tree:foldr(
+							fun({Wallet, Qty, Last}, WL) ->
+								[{
 									[
 										{wallet, ar_util:encode(Wallet)},
 										{quantity, Qty},
 										{last_tx, ar_util:encode(Last)}
 									]
-								}
+								} | WL]
 							end,
+							[],
 							WalletList
 						)
 					},

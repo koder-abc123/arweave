@@ -29,6 +29,7 @@
 	[
 		ar,
 		ar_unbalanced_merkle,
+		ar_patricia_tree,
 		ar_config_tests,
 		ar_deep_hash,
 		ar_inflation,

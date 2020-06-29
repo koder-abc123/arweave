@@ -134,11 +134,16 @@ tiny_network_with_reward_pool_test() ->
 %% @doc Check the current block can be retrieved
 get_current_block_test() ->
 	ar_storage:clear(),
-	ar:report([node, test, weave_init]),
 	[B0] = ar_weave:init(),
 	Node = ar_node:start([], [B0]),
 	B1 = ar_node:get_current_block(Node),
-	?assertEqual(B0#block{ hash_list = unset }, B1).
+	WL0 = ar_patricia_tree:foldr(fun(W, Acc) -> [W | Acc] end, [], B0#block.wallet_list),
+	WL1 = ar_patricia_tree:foldr(fun(W, Acc) -> [W | Acc] end, [], B1#block.wallet_list),
+	?assertEqual(
+		B0#block{ hash_list = unset, wallet_list = not_set },
+		B1#block{ wallet_list = not_set }
+	),
+	?assertEqual(WL0, WL1).
 
 %% @doc Run a small, non-auto-mining blockweave. Mine blocks.
 tiny_blockweave_with_mining_test() ->

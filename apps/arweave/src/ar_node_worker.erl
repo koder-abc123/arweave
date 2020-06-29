@@ -479,9 +479,7 @@ get_diverged_block_hashes_reversed(DivergedHashes, _) ->
 
 apply_new_block(State, BShadow) ->
 	#{
-		height := Height,
 		block_index := BI,
-		wallet_list := WalletList,
 		block_txs_pairs := BlockTXPairs
 	} = State,
 	case generate_block_from_shadow(State, BShadow) of
@@ -489,32 +487,16 @@ apply_new_block(State, BShadow) ->
 			B = ar_util:get_head_block(BI),
 			StateNew = State#{ wallet_list => NewB#block.wallet_list },
 			TXs = NewB#block.txs,
-			case ar_node_utils:validate(BI, NewB#block.wallet_list, NewB, TXs, B) of
-				{invalid, _Reason} ->
+			case ar_node_utils:validate(BI, NewB, B, BlockTXPairs) of
+				{invalid, Reason} ->
+					ar:err([
+						{event, received_invalid_block},
+						{validation_error, Reason}
+					]),
 					none;
 				valid ->
-					TXReplayCheck = ar_tx_replay_pool:verify_block_txs(
-						TXs,
-						NewB#block.diff,
-						Height,
-						NewB#block.timestamp,
-						WalletList,
-						BlockTXPairs
-					),
-					case TXReplayCheck of
-						invalid ->
-							ar:warn([
-								ar_node_worker,
-								process_new_block,
-								transaction_replay_detected,
-								{block_indep_hash, ar_util:encode(NewB#block.indep_hash)},
-								{txs, lists:map(fun(TX) -> ar_util:encode(TX#tx.id) end, TXs)}
-							]),
-							none;
-						valid ->
-							{ok, ar_node_utils:integrate_new_block(StateNew, NewB, TXs)}
-					end
-				end;
+					{ok, ar_node_utils:integrate_new_block(StateNew, NewB, TXs)}
+			end;
 		error ->
 			none
 	end.
@@ -528,29 +510,50 @@ generate_block_from_shadow(#{ txs := MempoolTXs } = State, BShadow) ->
 			ar:info([
 				ar_node_worker,
 				block_not_accepted,
-				{transactions_missing_in_mempool_for_block, ar_util:encode(BShadow#block.indep_hash)},
+				{
+					transactions_missing_in_mempool_for_block,
+					ar_util:encode(BShadow#block.indep_hash)
+				},
 				{missing_txs, lists:map(fun ar_util:encode/1, MissingTXIDs)}
 			]),
 			error
 	end.
 
 generate_block_from_shadow(State, BShadow, TXs) ->
-	{WalletListHash, WalletList} =
-		generate_wallet_list_from_shadow(State, BShadow, TXs),
-	B = BShadow#block {
-		wallet_list = WalletList,
-		wallet_list_hash = WalletListHash,
-		txs = TXs
-	},
-	{ok, B}.
+	#{
+		reward_pool := RewardPool,
+		wallet_list := WalletList,
+		height := Height
+	} = State,
+	BShadow2 = BShadow#block{ txs = TXs },
+	case ar_node_utils:update_wallet_list(BShadow2, WalletList, RewardPool, Height) of
+		{error, invalid_reward_pool} ->
+			ar:err([
+				{event, received_invalid_block},
+				{validation_error, invalid_reward_pool}
+			]),
+			error;
+		{ok, NewWalletList} ->
+			{WalletListHash, NewWalletList2} = ar_block:hash_wallet_list(
+				BShadow#block.height,
+				BShadow#block.reward_addr,
+				NewWalletList
+			),
+			B = BShadow2#block {
+				wallet_list = NewWalletList2,
+				wallet_list_hash = WalletListHash
+			},
+			{ok, B}
+	end.
 
 pick_txs(TXIDs, TXs) ->
 	lists:foldr(
 		fun(TXID, {Found, Missing}) ->
 			case maps:get(TXID, TXs, tx_not_in_mempool) of
 				tx_not_in_mempool ->
-					%% This disk read should almost never be useful. Presumably, the only reason to find some of these
-					%% transactions on disk is they had been written prior to the call, what means they are
+					%% This disk read should almost never be useful. Presumably,
+					%% the only reason to find some of these transactions on disk
+					%% is they had been written prior to the call, what means they are
 					%% from an orphaned fork, more than one block behind.
 					case ar_storage:read_tx(TXID) of
 						unavailable ->
@@ -565,34 +568,6 @@ pick_txs(TXIDs, TXs) ->
 		{[], []},
 		TXIDs
 	).
-
-generate_wallet_list_from_shadow(StateIn, BShadow, TXs) ->
-	#{
-		reward_pool := RewardPool,
-		wallet_list := WalletList,
-		height := Height
-	} = StateIn,
-	RewardAddr = BShadow#block.reward_addr,
-	NewHeight = BShadow#block.height,
-	{FinderReward, _} =
-		ar_node_utils:calculate_reward_pool(
-			RewardPool,
-			TXs,
-			RewardAddr,
-			no_recall,
-			BShadow#block.weave_size,
-			NewHeight,
-			BShadow#block.diff,
-			BShadow#block.timestamp
-		),
-	NewWalletList = ar_node_utils:apply_mining_reward(
-		ar_node_utils:apply_txs(WalletList, TXs, Height),
-		RewardAddr,
-		FinderReward,
-		NewHeight
-	),
-	WalletListHash = ar_block:hash_wallet_list(NewHeight, RewardAddr, NewWalletList),
-	{WalletListHash, NewWalletList}.
 
 maybe_fork_recover(State, BShadow, Peer, RecoveryHashes, BI, BlockTXPairs) ->
 	#{

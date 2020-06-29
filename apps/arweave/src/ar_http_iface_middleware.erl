@@ -493,12 +493,8 @@ handle(<<"GET">>, [<<"block_index">>], Req, _Pid) ->
 %% GET request to endpoint /wallet_list
 handle(<<"GET">>, [<<"wallet_list">>], Req, _Pid) ->
 	Node = whereis(http_entrypoint_node),
-	WalletList = ar_node:get_wallet_list(Node),
-	{200, #{},
-		ar_serialize:jsonify(
-			ar_serialize:wallet_list_to_json_struct(WalletList)
-		),
-	Req};
+	H = ar_node:get_current_block_hash(Node),
+	process_request(get_block, [<<"hash">>, H, <<"wallet_list">>], Req);
 
 %% @doc Share your nodes IP with another peer.
 %% POST request to endpoint /peers with the body of the request being your
@@ -944,7 +940,7 @@ handle_post_tx(Req, PeerIP, TX) ->
 handle_post_tx(Req, PeerIP, Node, TX, Height) ->
 	WalletList = ar_node:get_wallet_list(Node),
 	OwnerAddr = ar_wallet:to_address(TX#tx.owner),
-	case lists:keyfind(OwnerAddr, 1, WalletList) of
+	case ar_patricia_tree:get(OwnerAddr, WalletList) of
 		{_, Balance, _} when (TX#tx.reward + TX#tx.quantity) > Balance ->
 			ar:info([
 				submitted_txs_exceed_balance,

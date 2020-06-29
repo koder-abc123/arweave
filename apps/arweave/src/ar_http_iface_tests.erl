@@ -230,7 +230,7 @@ get_block_by_hash_test() ->
 %% @doc Ensure that blocks can be received via a height.
 get_block_by_height_test() ->
 	ar_storage:clear(),
-	[B0] = ar_weave:init([]),
+	[B0] = ar_weave:init(),
 	ar_storage:write_block(B0),
 	Node1 = ar_node:start([], [B0]),
 	ar_http_iface_server:reregister(Node1),
@@ -239,7 +239,10 @@ get_block_by_height_test() ->
 			[{127, 0, 0, 1, 1984}],
 			0
 		),
-	?assertEqual(B0#block{ hash_list = unset }, B1#block{ wallet_list = [] }).
+	?assertEqual(
+		B0#block{ hash_list = unset, wallet_list = not_set },
+		B1#block{ wallet_list = not_set }
+	).
 
 get_current_block_test() ->
 	ar_storage:clear(),

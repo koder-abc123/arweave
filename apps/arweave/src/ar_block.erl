@@ -1,21 +1,18 @@
 -module(ar_block).
 
--export([block_to_binary/1, block_field_size_limit/1]).
+-export([block_field_size_limit/1]).
 -export([verify_dep_hash/2, verify_indep_hash/1, verify_timestamp/1]).
 -export([verify_height/2, verify_last_retarget/2, verify_previous_block/2]).
--export([verify_block_hash_list/2, verify_wallet_list/4, verify_weave_size/3]).
+-export([verify_block_hash_list/2, verify_weave_size/3]).
 -export([verify_cumulative_diff/2, verify_block_hash_list_merkle/3]).
 -export([verify_tx_root/1]).
 -export([hash_wallet_list/2, hash_wallet_list/3, hash_wallet_list_without_reward_wallet/2]).
--export([hash_wallet_list_pre_2_0/1]).
 -export([generate_block_data_segment/1, generate_block_data_segment/3, generate_block_data_segment_base/1]).
 -export([generate_hash_list_for_block/2]).
 -export([generate_tx_root_for_block/1, generate_size_tagged_list_from_txs/1]).
 -export([generate_tx_tree/1, generate_tx_tree/2]).
 -export([compute_hash_list_merkle/2]).
-
-%% NOT used. Exported for the historical record.
--export([generate_block_data_segment_pre_2_0/6]).
+-export([test_wallet_list_performance/1]).
 
 -include("ar.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -25,33 +22,78 @@ hash_wallet_list(_Height, _RewardAddr, WalletListHash) when is_binary(WalletList
 hash_wallet_list(Height, RewardAddr, WalletList) ->
 	case Height < ar_fork:height_2_0() of
 		true ->
-			hash_wallet_list_pre_2_0(WalletList);
+			{hash_wallet_list_pre_2_0(RewardAddr, WalletList), WalletList};
 		false ->
-			{RewardWallet, NoRewardWalletListHash} =
-				hash_wallet_list_without_reward_wallet(RewardAddr, WalletList),
-			hash_wallet_list(RewardWallet, NoRewardWalletListHash)
+			case Height < ar_fork:height_2_2() of
+				true ->
+					{hash_wallet_list_pre_2_2(RewardAddr, WalletList), WalletList};
+				false ->
+					case ar_patricia_tree:is_empty(WalletList) of
+						true ->
+							{<<>>, WalletList};
+						false ->
+							ar_patricia_tree:compute_hash(
+								WalletList,
+								fun({W, B, LTX}) -> [W, binary:encode_unsigned(B), LTX] end
+							)
+					end
+			end
 	end.
 
-hash_wallet_list_pre_2_0(WalletList) ->
-	Bin =
-		<<
-			<< Addr/binary, (binary:encode_unsigned(Balance))/binary, LastTX/binary >>
-		||
-			{Addr, Balance, LastTX} <- WalletList
-		>>,
-	crypto:hash(?HASH_ALG, Bin).
+hash_wallet_list_pre_2_0(RewardAddr, WalletList) ->
+	%% The function would not not work for the genesis block, because the genesis wallet list
+	%% is not sorted.
+	Bin = iolist_to_binary(
+		ar_patricia_tree:foldr(
+			fun({Addr, Balance, LastTX}, Acc) ->
+				case Addr == RewardAddr of
+					true ->
+						Acc;
+					false ->
+						EncodedBalance = binary:encode_unsigned(Balance),
+						[<< Addr/binary, EncodedBalance/binary, LastTX/binary >> | Acc]
+				end
+			end,
+			<<>>,
+			WalletList
+		)
+	),
+	case ar_patricia_tree:get(RewardAddr, WalletList) of
+		not_found ->
+			crypto:hash(?HASH_ALG, Bin);
+		{Addr, Balance, LastTX} ->
+			EncodedBalance = binary:encode_unsigned(Balance),
+			RewardAddrBin = << Addr/binary, EncodedBalance/binary, LastTX/binary >>,
+			crypto:hash(?HASH_ALG, << RewardAddrBin/binary, Bin/binary >>)
+	end.
+
+hash_wallet_list_pre_2_2(RewardAddr, WalletList) ->
+	{RewardWallet, NoRewardWalletListHash} =
+		hash_wallet_list_without_reward_wallet(RewardAddr, WalletList),
+	hash_wallet_list(RewardWallet, NoRewardWalletListHash).
 
 hash_wallet_list_without_reward_wallet(RewardAddr, WalletList) ->
-	{RewardWallet, NoRewardWalletList} =
-		case lists:keytake(RewardAddr, 1, WalletList) of
-			{value, RW, NewWalletList} ->
-				{RW, NewWalletList};
-			false ->
-				{unclaimed, WalletList}
+	RewardWallet =
+		case ar_patricia_tree:get(RewardAddr, WalletList) of
+			not_found ->
+				unclaimed;
+			RW ->
+				RW
 		end,
-	NoRewardWLH = ar_deep_hash:hash([
-		[A, binary:encode_unsigned(B), Anchor] || {A, B, Anchor} <- NoRewardWalletList
-	]),
+	NoRewardWLH = ar_deep_hash:hash(
+		ar_patricia_tree:foldr(
+			fun({A, B, Anchor}, Acc) ->
+				case A == RewardAddr of
+					true ->
+						Acc;
+					false ->
+						[[A, binary:encode_unsigned(B), Anchor] | Acc]
+				end
+			end,
+			[],
+			WalletList
+		)
+	),
 	{RewardWallet, NoRewardWLH}.
 
 hash_wallet_list(RewardWallet, NoRewardWalletListHash) ->
@@ -101,45 +143,6 @@ do_generate_hash_list_for_block(_, []) ->
 do_generate_hash_list_for_block(IndepHash, [{IndepHash, _, _} | BI]) -> ?BI_TO_BHL(BI);
 do_generate_hash_list_for_block(IndepHash, [_ | Rest]) ->
 	do_generate_hash_list_for_block(IndepHash, Rest).
-
-%% @doc Generate a hashable binary from a #block object.
-block_to_binary(B) ->
-	{ok, WalletList} = ar_storage:read_wallet_list(B#block.wallet_list),
-	<<
-		(B#block.nonce)/binary,
-		(B#block.previous_block)/binary,
-		(list_to_binary(integer_to_list(B#block.timestamp)))/binary,
-		(list_to_binary(integer_to_list(B#block.last_retarget)))/binary,
-		(list_to_binary(integer_to_list(B#block.diff)))/binary,
-		(list_to_binary(integer_to_list(B#block.height)))/binary,
-		(B#block.hash)/binary,
-		(B#block.indep_hash)/binary,
-		(
-			binary:list_to_bin(
-				lists:map(
-					fun ar_tx:tx_to_binary/1,
-					lists:sort(ar_storage:read_tx(B#block.txs))
-				)
-			)
-		)/binary,
-		(list_to_binary(B#block.hash_list))/binary,
-		(
-			binary:list_to_bin(
-				lists:map(
-					fun ar_wallet:to_binary/1,
-					WalletList
-				)
-			)
-		)/binary,
-		(
-			case is_atom(B#block.reward_addr) of
-				true -> <<>>;
-				false -> B#block.reward_addr
-			end
-		)/binary,
-		(list_to_binary(B#block.tags))/binary,
-		(list_to_binary(integer_to_list(B#block.weave_size)))/binary
-	>>.
 
 %% @doc Given a block checks that the lengths conform to the specified limits.
 block_field_size_limit(B = #block { reward_addr = unclaimed }) ->
@@ -290,131 +293,6 @@ poa_to_list(POA) ->
 		POA#poa.chunk
 	].
 
-%% @doc Generate a hashable data segment for a block from the preceding block,
-%% the preceding block's recall block, TXs to be mined, reward address and tags.
-generate_block_data_segment_pre_2_0(PrecedingB, PrecedingRecallB, [unavailable], RewardAddr, Time, Tags) ->
-	generate_block_data_segment_pre_2_0(
-		PrecedingB,
-		PrecedingRecallB,
-		[],
-		RewardAddr,
-		Time,
-		Tags
-	);
-generate_block_data_segment_pre_2_0(PrecedingB, PrecedingRecallB, TXs, unclaimed, Time, Tags) ->
-	generate_block_data_segment_pre_2_0(
-		PrecedingB,
-		PrecedingRecallB,
-		TXs,
-		<<>>,
-		Time,
-		Tags
-	);
-generate_block_data_segment_pre_2_0(PrecedingB, PrecedingRecallB, TXs, RewardAddr, Time, Tags) ->
-	{_, BDS} = generate_block_data_segment_and_pieces(PrecedingB, PrecedingRecallB, TXs, RewardAddr, Time, Tags),
-	BDS.
-
-generate_block_data_segment_and_pieces(PrecedingB, PrecedingRecallB, TXs, RewardAddr, Time, Tags) ->
-	NewHeight = PrecedingB#block.height + 1,
-	Retarget =
-		case ar_retarget:is_retarget_height(NewHeight) of
-			true -> Time;
-			false -> PrecedingB#block.last_retarget
-		end,
-	WeaveSize = PrecedingB#block.weave_size +
-		lists:foldl(
-			fun(TX, Acc) ->
-				Acc + TX#tx.data_size
-			end,
-			0,
-			TXs
-		),
-	NewDiff = ar_retarget:maybe_retarget(
-		PrecedingB#block.height + 1,
-		PrecedingB#block.diff,
-		Time,
-		PrecedingB#block.last_retarget
-	),
-	{FinderReward, RewardPool} =
-		ar_node_utils:calculate_reward_pool(
-			PrecedingB#block.reward_pool,
-			TXs,
-			RewardAddr,
-			PrecedingRecallB,
-			WeaveSize,
-			PrecedingB#block.height + 1,
-			NewDiff,
-			Time
-		),
-	NewWalletList =
-		ar_node_utils:apply_mining_reward(
-			ar_node_utils:apply_txs(PrecedingB#block.wallet_list, TXs, PrecedingB#block.height),
-			RewardAddr,
-			FinderReward,
-			length(PrecedingB#block.hash_list) - 1
-		),
-	MR =
-		case PrecedingB#block.height >= ?FORK_1_6 of
-			true -> PrecedingB#block.hash_list_merkle;
-			false -> <<>>
-		end,
-	Pieces = [
-		<<
-			(PrecedingB#block.indep_hash)/binary,
-			(PrecedingB#block.hash)/binary
-		>>,
-		<<
-			(integer_to_binary(Time))/binary,
-			(integer_to_binary(Retarget))/binary
-		>>,
-		<<
-			(integer_to_binary(PrecedingB#block.height + 1))/binary,
-			(
-				list_to_binary(
-					[PrecedingB#block.indep_hash | PrecedingB#block.hash_list]
-				)
-			)/binary
-		>>,
-		<<
-			(
-				binary:list_to_bin(
-					lists:map(
-						fun ar_wallet:to_binary/1,
-						NewWalletList
-					)
-				)
-			)/binary
-		>>,
-		<<
-			(
-				case is_atom(RewardAddr) of
-					true -> <<>>;
-					false -> RewardAddr
-				end
-			)/binary,
-			(list_to_binary(Tags))/binary
-		>>,
-		<<
-			(integer_to_binary(RewardPool))/binary
-		>>,
-		<<
-			(block_to_binary(PrecedingRecallB))/binary,
-			(
-				binary:list_to_bin(
-					lists:map(
-						fun ar_tx:tx_to_binary/1,
-						TXs
-					)
-				)
-			)/binary,
-			MR/binary
-		>>
-	],
-	{Pieces, crypto:hash(
-		?MINING_HASH_ALG,
-		<< Piece || Piece <- Pieces >>
-	)}.
-
 %% @doc Verify the independant hash of a given block is valid
 verify_indep_hash(Block = #block { indep_hash = Indep }) ->
 	Indep == ar_weave:indep_hash(Block).
@@ -489,46 +367,6 @@ verify_block_hash_list(NewB, OldB) when NewB#block.height < ?FORK_1_6 ->
 	NewB#block.hash_list == [OldB#block.indep_hash | OldB#block.hash_list];
 verify_block_hash_list(_NewB, _OldB) -> true.
 
-%% @doc Verify that the new blocks wallet_list and reward_pool matches that
-%% generated by applying, the block miner reward and mined TXs to the current
-%% (old) blocks wallet_list and reward pool.
-verify_wallet_list(NewB, OldB, POA, NewTXs) ->
-	{FinderReward, RewardPool} =
-		ar_node_utils:calculate_reward_pool(
-			OldB#block.reward_pool,
-			NewTXs,
-			NewB#block.reward_addr,
-			POA,
-			NewB#block.weave_size,
-			OldB#block.height + 1,
-			NewB#block.diff,
-			NewB#block.timestamp
-		),
-	RewardAddress = case OldB#block.reward_addr of
-		unclaimed -> <<"unclaimed">>;
-		_         -> ar_util:encode(OldB#block.reward_addr)
-	end,
-	ar:info(
-		[
-			{event, verifying_finder_reward},
-			{finder_reward, FinderReward},
-			{new_reward_pool, RewardPool},
-			{reward_address, RewardAddress},
-			{old_reward_pool, OldB#block.reward_pool},
-			{txs, length(NewTXs)},
-			{weave_size, NewB#block.weave_size},
-			{height, OldB#block.height + 1}
-		]
-	),
-	(NewB#block.reward_pool == RewardPool) and
-	((NewB#block.wallet_list) ==
-		ar_node_utils:apply_mining_reward(
-			ar_node_utils:apply_txs(OldB#block.wallet_list, NewTXs, OldB#block.height),
-			NewB#block.reward_addr,
-			FinderReward,
-			NewB#block.height
-		)).
-
 verify_weave_size(NewB, OldB, TXs) ->
 	NewB#block.weave_size == lists:foldl(
 		fun(TX, Acc) ->
@@ -584,3 +422,91 @@ hash_list_gen_test() ->
 	HL2 = B2#block.hash_list,
 	HL1 = generate_hash_list_for_block(B1, BI),
 	HL2 = generate_hash_list_for_block(B2#block.indep_hash, BI).
+
+test_wallet_list_performance(Length) ->
+	io:format("# ~B wallets~n", [Length]),
+	io:format("============~n"),
+	WL = [random_wallet() || _ <- lists:seq(1, Length)],
+	{Time1, T1} =
+		timer:tc(
+			fun() ->
+				lists:foldl(
+					fun({A, _, _} = W, Acc) -> ar_patricia_tree:insert(A, W, Acc) end,
+					ar_patricia_tree:new(),
+					WL
+				)
+			end
+		),
+	io:format("tree buildup                    | ~f seconds~n", [Time1 / 1000000]),
+	{Time2, Binary} =
+		timer:tc(
+			fun() ->
+				ar_serialize:jsonify(ar_serialize:wallet_list_to_json_struct(unclaimed, T1))
+			end
+		),
+	io:format("serialization                   | ~f seconds~n", [Time2 / 1000000]),
+	io:format("                                | ~B bytes~n", [byte_size(Binary)]),
+	{Time3, {_, T2}} =
+		timer:tc(
+			fun() ->
+				ar_patricia_tree:compute_hash(
+					T1,
+					fun({A, B, L}) ->
+						ar_deep_hash:hash([A, binary:encode_unsigned(B), L])
+					end
+				)
+			end
+		),
+	io:format("root hash from scratch          | ~f seconds~n", [Time3 / 1000000]),
+	{Time4, T3} =
+		timer:tc(
+			fun() ->
+				lists:foldl(
+					fun({A, _, _} = W, Acc) ->
+						ar_patricia_tree:insert(A, W, Acc)
+					end,
+					T2,
+					[random_wallet() || _ <- lists:seq(1, 2000)]
+				)
+			end
+		),
+	io:format("2000 inserts                    | ~f seconds~n", [Time4 / 1000000]),
+	{Time5, _} =
+		timer:tc(
+			fun() ->
+				ar_patricia_tree:compute_hash(
+					T3,
+					fun({A, B, L}) ->
+						ar_deep_hash:hash([A, binary:encode_unsigned(B), L])
+					end
+				)
+			end
+		),
+	io:format("recompute hash after 2k inserts | ~f seconds~n", [Time5 / 1000000]),
+	{Time6, T4} =
+		timer:tc(
+			fun() ->
+				{A, _, _} = W = random_wallet(),
+				ar_patricia_tree:insert(A, W, T2)
+			end
+		),
+	io:format("1 insert                        | ~f seconds~n", [Time6 / 1000000]),
+	{Time7, _} =
+		timer:tc(
+			fun() ->
+				ar_patricia_tree:compute_hash(
+					T4,
+					fun({A, B, L}) ->
+						ar_deep_hash:hash([A, binary:encode_unsigned(B), L])
+					end
+				)
+			end
+		),
+	io:format("recompute hash after 1 insert   | ~f seconds~n", [Time7 / 1000000]).
+
+random_wallet() ->
+	{
+		crypto:strong_rand_bytes(32),
+		rand:uniform(1000000000000000000),
+		crypto:strong_rand_bytes(32)
+	}.

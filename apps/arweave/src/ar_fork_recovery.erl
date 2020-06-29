@@ -153,11 +153,28 @@ update_target_hashes(State, NewRecoveryHashes, Peer) ->
 
 apply_next_block(State) ->
 	#state {
+		recovered_block_index = [{CurrentH, _, _} | _]
+	} = State,
+	B = ar_storage:read_block(CurrentH),
+	case ?IS_BLOCK(B) of
+		false ->
+			ar:err(
+				[
+					{event, fork_recovery_failed},
+					{reason, failed_to_read_current_block}
+				]
+			);
+		true ->
+			apply_next_block(State, B)
+	end.
+
+apply_next_block(State, B) ->
+	#state {
 		peers = Peers,
 		target_height = TargetHeight,
 		target_hashes_to_go = [NextH | _]
 	} = State,
-	NextB = ar_http_iface_client:get_block(Peers, NextH),
+	NextB = ar_http_iface_client:get_block(Peers, NextH, [no_wallet_list]),
 	ar:info(
 		[
 			{event, applying_fork_recovery},
@@ -201,25 +218,32 @@ apply_next_block(State) ->
 					);
 				%% Target block is within the accepted range.
 				{_X, _Y} ->
-					apply_next_block(State, NextB)
+					WalletList = B#block.wallet_list,
+					RewardP = B#block.reward_pool,
+					Height = B#block.height,
+					case ar_node_utils:update_wallet_list(NextB, WalletList, RewardP, Height) of
+						{error, invalid_reward_pool} ->
+							ar:err(
+								[
+									{event, fork_recovery_failed},
+									{reason, got_block_with_invalid_reward_pool},
+									{block_height, NextB#block.height},
+									{block_hash, ar_util:encode(NextB#block.indep_hash)}
+								]
+							);
+						{ok, WalletList2} ->
+							{WLH, WalletList3} = ar_block:hash_wallet_list(
+								NextB#block.height,
+								NextB#block.reward_addr,
+								WalletList2
+							),
+							apply_next_block(
+								State,
+								NextB#block{ wallet_list = WalletList3, wallet_list_hash = WLH },
+								B
+							)
+					end
 			end
-	end.
-
-apply_next_block(State, NextB) ->
-	#state {
-		recovered_block_index = [{CurrentH, _, _} | _]
-	} = State,
-	B = ar_storage:read_block(CurrentH),
-	case ?IS_BLOCK(B) of
-		false ->
-			ar:err(
-				[
-					{event, fork_recovery_failed},
-					{reason, failed_to_read_current_block}
-				]
-			);
-		true ->
-			apply_next_block(State, NextB, B)
 	end.
 
 apply_next_block(State, NextB, B) ->
@@ -231,48 +255,18 @@ apply_next_block(State, NextB, B) ->
 		target_hashes = TargetHashes,
 		base_hash = BaseH
 	} = State,
-	TXs = NextB#block.txs,
-	case
-		validate(
-			BI,
-			NextB#block {
-				txs = [TX#tx.id || TX <- TXs]
-			},
-			TXs,
-			B,
-			BlockTXPairs
-		)
-	of
-		{error, invalid_block} ->
+	case ar_node_utils:validate(BI, NextB, B, BlockTXPairs) of
+		{invalid, Reason} ->
 			ar:err(
 				[
 					{event, fork_recovery_failed},
 					{reason, invalid_block},
+					{validation_error, Reason},
 					{block, ar_util:encode(NextB#block.indep_hash)},
 					{previous_block, ar_util:encode(B#block.indep_hash)}
 				]
 			);
-		{error, tx_replay} ->
-			ar:err(
-				[
-					{event, fork_recovery_failed},
-					{reason, tx_replay},
-					{block, ar_util:encode(NextB#block.indep_hash)},
-					{block_txs, lists:map(fun(TX) -> ar_util:encode(TX#tx.id) end, TXs)},
-					{
-						block_txs_pairs,
-						lists:map(
-							fun({BH, SizeTaggedTXs}) ->
-								TXIDs = [TXID || {{TXID, _}, _} <- SizeTaggedTXs],
-								{ar_util:encode(BH), lists:map(fun ar_util:encode/1, TXIDs)}
-							end,
-							BlockTXPairs
-						)
-					},
-					{previous_block, ar_util:encode(B#block.indep_hash)}
-				]
-			);
-		ok ->
+		valid ->
 			ar:info(
 				[
 					{event, applied_fork_recovery_block},
@@ -305,7 +299,8 @@ apply_next_block(State, NextB, B) ->
 				_ -> do_nothing
 			end,
 			self() ! apply_next_block,
-			prometheus_histogram:observe(fork_recovery_depth, length(TargetHashes) - length(NewTargetHashesToGo)),
+			prometheus_histogram:observe(
+				fork_recovery_depth, length(TargetHashes) - length(NewTargetHashesToGo)),
 			server(
 				State#state {
 					recovered_block_index = NewBI,
@@ -313,54 +308,6 @@ apply_next_block(State, NextB, B) ->
 					target_hashes_to_go = NewTargetHashesToGo
 				}
 			)
-	end.
-
-%% @doc Validate a new block (NextB) against the current block (B).
-%% Returns ok | {error, invalid_block} | {error, tx_replay}.
-validate(BI, NextB, TXs, B, BlockTXPairs) ->
-	{FinderReward, _} =
-		ar_node_utils:calculate_reward_pool(
-			B#block.reward_pool,
-			TXs,
-			NextB#block.reward_addr,
-			no_recall,
-			NextB#block.weave_size,
-			NextB#block.height,
-			NextB#block.diff,
-			NextB#block.timestamp
-		),
-	WalletList =
-		ar_node_utils:apply_mining_reward(
-			ar_node_utils:apply_txs(B#block.wallet_list, TXs, B#block.height),
-			NextB#block.reward_addr,
-			FinderReward,
-			NextB#block.height
-		),
-	BlockValid = ar_node_utils:validate(
-		BI,
-		WalletList,
-		NextB,
-		TXs,
-		B
-	),
-	case BlockValid of
-		{invalid, _} ->
-			{error, invalid_block};
-		valid ->
-			TXReplayCheck = ar_tx_replay_pool:verify_block_txs(
-				TXs,
-				NextB#block.diff,
-				B#block.height,
-				NextB#block.timestamp,
-				B#block.wallet_list,
-				BlockTXPairs
-			),
-			case TXReplayCheck of
-				invalid ->
-					{error, tx_replay};
-				valid ->
-					ok
-			end
 	end.
 
 %%%

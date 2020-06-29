@@ -331,7 +331,7 @@ get_wallet_list(Node) ->
 	Node ! {get_walletlist, self(), Ref},
 	receive
 		{Ref, walletlist, WalletList} -> WalletList
-		after ?LOCAL_NET_TIMEOUT -> []
+		after ?LOCAL_NET_TIMEOUT -> ar_patricia_tree:new()
 	end.
 
 get_block_index(Node) ->
@@ -697,17 +697,17 @@ handle(SPid, {get_height, From, Ref}) ->
 handle(SPid, {get_balance, From, Ref, WalletID}) ->
 	{ok, WalletList} = ar_node_state:lookup(SPid, wallet_list),
 	From ! {Ref, balance, WalletID,
-		case lists:keyfind(WalletID, 1, WalletList) of
+		case ar_patricia_tree:get(WalletID, WalletList) of
 			{WalletID, Balance, _Last} -> Balance;
-			false					   -> 0
+			not_found                  -> 0
 		end},
 	ok;
 handle(SPid, {get_last_tx, From, Ref, Addr}) ->
 	{ok, WalletList} = ar_node_state:lookup(SPid, wallet_list),
 	From ! {Ref, last_tx, Addr,
-		case lists:keyfind(Addr, 1, WalletList) of
+		case ar_patricia_tree:get(Addr, WalletList) of
 			{Addr, _Balance, Last} -> Last;
-			false				   -> <<>>
+			not_found              -> <<>>
 		end},
 	ok;
 handle(SPid, {get_pending_txs, From, Ref}) ->

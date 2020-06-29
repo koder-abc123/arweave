@@ -4,21 +4,27 @@
 
 -module(ar_node_utils).
 
--export([find_recall_block/1, find_block/1]).
--export([calculate_reward/2]).
--export([calculate_reward_pool/8]).
--export([apply_mining_reward/4, apply_tx/3, apply_txs/3]).
--export([start_mining/1, reset_miner/1]).
--export([integrate_new_block/3]).
--export([validate/5, validate_wallet_list/1]).
--export([calculate_delay/1]).
--export([update_block_txs_pairs/3, update_block_index/2]).
--export([get_wallet_by_address/2, wallet_map_from_wallet_list/1]).
--export([tx_mempool_size/1, increase_mempool_size/2, calculate_mempool_size/1]).
--export([drop_invalid_txs/1]).
-
-%% NOT used. Exported for the historical record.
--export([validate_pre_fork_2_0/8]).
+-export([
+	find_recall_block/1,
+	find_block/1,
+	calculate_reward/2,
+	calculate_reward_pool/8,
+	apply_mining_reward/4,
+	apply_tx/3,
+	apply_txs/3,
+	start_mining/1,
+	reset_miner/1,
+	integrate_new_block/3,
+	validate/4,
+	calculate_delay/1,
+	update_block_txs_pairs/3,
+	update_block_index/2,
+	tx_mempool_size/1,
+	increase_mempool_size/2,
+	calculate_mempool_size/1,
+	drop_invalid_txs/1,
+	update_wallet_list/4
+]).
 
 -include("ar.hrl").
 -include("ar_data_sync.hrl").
@@ -180,41 +186,19 @@ apply_mining_reward(WalletList, RewardAddr, Quantity, Height) ->
 	alter_wallet(WalletList, RewardAddr, calculate_reward(Height, Quantity)).
 
 %% @doc Apply a transaction to a wallet list, updating it.
-apply_tx(Wallets, unavailable, _) ->
-	Wallets;
-apply_tx(Wallets, TX, Height) ->
-	do_apply_tx(Wallets, TX, Height).
+apply_tx(WalletList, unavailable, _) ->
+	WalletList;
+apply_tx(WalletList, TX, Height) ->
+	do_apply_tx(WalletList, TX, Height).
 
 %% @doc Update a wallet list with a set of new transactions.
 apply_txs(WalletList, TXs, Height) ->
-	WalletMap = wallet_map_from_wallet_list(WalletList),
-	NewWalletMap = lists:foldl(
-		fun(TX, CurrWalletMap) ->
-			apply_tx(CurrWalletMap, TX, Height)
-		end,
-		WalletMap,
-		TXs
-	),
-	lists:sort(
-		wallet_list_from_wallet_map(NewWalletMap)
-	).
-
-wallet_map_from_wallet_list(WalletList) ->
 	lists:foldl(
-		fun(Wallet = {Addr, _, _}, Map) ->
-			maps:put(Addr, Wallet, Map)
+		fun(TX, Acc) ->
+			apply_tx(Acc, TX, Height)
 		end,
-		maps:new(),
-		WalletList
-	).
-
-wallet_list_from_wallet_map(WalletMap) ->
-	maps:fold(
-		fun(_Addr, Wallet, List) ->
-			[Wallet | List]
-		end,
-		[],
-		WalletMap
+		WalletList,
+		TXs
 	).
 
 %% @doc Force a node to start mining, update state.
@@ -369,8 +353,9 @@ maybe_report_n_confirmations(B, BI) ->
 update_block_txs_pairs(BH, SizeTaggedTXs, BlockTXPairs) ->
 	lists:sublist([{BH, SizeTaggedTXs} | BlockTXPairs], 2 * ?MAX_TX_ANCHOR_DEPTH).
 
-%% @doc Validate a new block, given a server state, a claimed new block and the last block.
-validate(BI, WalletList, NewB, TXs, B) ->
+%% @doc Validate a new block, given the previous block, the block index, and the mapping
+%% between block hashes and transaction identifiers of the recent blocks.
+validate(BI, NewB, B, BlockTXPairs) ->
 	ar:info(
 		[
 			{event, validating_block},
@@ -379,7 +364,7 @@ validate(BI, WalletList, NewB, TXs, B) ->
 	),
 	case timer:tc(
 		fun() ->
-			do_validate(BI, WalletList, NewB, TXs, B)
+			do_validate(BI, NewB, B, BlockTXPairs)
 		end
 	) of
 		{TimeTaken, valid} ->
@@ -403,51 +388,44 @@ validate(BI, WalletList, NewB, TXs, B) ->
 			{invalid, Reason}
 	end.
 
-do_validate(BI, WalletList, NewB = #block{ wallet_list = WalletList }, TXs, OldB) ->
-	validate_block(height, {BI, WalletList, NewB, TXs, OldB});
-do_validate(_BI, _WL, NewB, _TXs, _OldB) ->
-	ar:info([
-		{event, block_not_accepted},
-		{hash, ar_util:encode(NewB#block.indep_hash)}
-	]),
-	{invalid, invalid_wallet_list}.
+do_validate(BI, NewB, OldB, BlockTXPairs) ->
+	validate_block(height, {BI, NewB, OldB, BlockTXPairs}).
 
-validate_block(height, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(height, {BI, NewB, OldB, BlockTXPairs}) ->
 	case ar_block:verify_height(NewB, OldB) of
 		false ->
 			{invalid, invalid_height};
 		true ->
-			validate_block(previous_block, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(previous_block, {BI, NewB, OldB, BlockTXPairs})
 	end;
-validate_block(previous_block, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(previous_block, {BI, NewB, OldB, BlockTXPairs}) ->
 	case ar_block:verify_previous_block(NewB, OldB) of
 		false ->
 			{invalid, invalid_previous_block};
 		true ->
-			validate_block(poa, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(poa, {BI, NewB, OldB, BlockTXPairs})
 	end;
-validate_block(poa, {BI, WalletList, NewB = #block{ poa = POA }, TXs, OldB}) ->
+validate_block(poa, {BI, NewB = #block{ poa = POA }, OldB, BlockTXPairs}) ->
 	case ar_poa:validate(OldB#block.indep_hash, OldB#block.weave_size, BI, POA) of
 		false ->
 			{invalid, invalid_poa};
 		true ->
-			validate_block(difficulty, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(difficulty, {BI, NewB, OldB, BlockTXPairs})
 	end;
-validate_block(difficulty, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(difficulty, {BI, NewB, OldB, BlockTXPairs}) ->
 	case ar_retarget:validate_difficulty(NewB, OldB) of
 		false ->
 			{invalid, invalid_difficulty};
 		true ->
-			validate_block(pow, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(pow, {BI, NewB, OldB, BlockTXPairs})
 	end;
 validate_block(
 	pow,
 	{
 		BI,
-		WalletList,
 		NewB = #block{ nonce = Nonce, height = Height, diff = Diff, poa = POA },
-		TXs,
-		OldB
+		OldB,
+		BlockTXPairs
 	}
 ) ->
 	POW = ar_weave:hash(
@@ -463,218 +441,76 @@ validate_block(
 				false ->
 					{invalid, invalid_pow_hash};
 				true ->
-					validate_block(independent_hash, {BI, WalletList, NewB, TXs, OldB})
+					validate_block(independent_hash, {BI,  NewB, OldB, BlockTXPairs})
 			end
 	end;
-validate_block(independent_hash, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(independent_hash, {BI, NewB, OldB, BlockTXPairs}) ->
 	case ar_weave:indep_hash_post_fork_2_0(NewB) == NewB#block.indep_hash of
 		false ->
 			{invalid, invalid_independent_hash};
 		true ->
-			validate_block(wallet_list, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(wallet_list, {BI, NewB, OldB, BlockTXPairs})
 	end;
-validate_block(wallet_list, {BI, WalletList, NewB = #block{ poa = POA }, TXs, OldB}) ->
-	case validate_wallet_list(WalletList) of
-		false ->
-			{invalid, invalid_wallet_list};
+validate_block(wallet_list, {BI, #block{ txs = TXs } = NewB, OldB, BlockTXPairs}) ->
+	WalletList = NewB#block.wallet_list,
+	case lists:any(fun(TX) -> is_wallet_invalid(TX, WalletList) end, TXs) of
 		true ->
-			case ar_block:verify_wallet_list(NewB, OldB, POA, TXs) of
-				false ->
-					{invalid, invalid_wallet_list};
-				true ->
-					validate_block(block_field_sizes, {BI, WalletList, NewB, TXs, OldB})
-			end
+			{invalid, invalid_wallet_list};
+		false ->
+			validate_block(block_field_sizes, {BI, NewB, OldB, BlockTXPairs})
 	end;
-validate_block(block_field_sizes, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(block_field_sizes, {BI, NewB, OldB, BlockTXPairs}) ->
 	case ar_block:block_field_size_limit(NewB) of
 		false ->
 			{invalid, invalid_field_size};
 		true ->
-			validate_block(txs, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(txs, {BI, NewB, OldB, BlockTXPairs})
 	end;
 validate_block(
 	txs,
 	{
 		BI,
-		WalletList,
-		NewB = #block{ timestamp = Timestamp, height = Height, diff = Diff },
-		TXs,
-		OldB
+		NewB = #block{ timestamp = Timestamp, height = Height, diff = Diff, txs = TXs },
+		OldB,
+		BlockTXPairs
 	}
 ) ->
-	case ar_tx:verify_txs(TXs, Diff, Height - 1, OldB#block.wallet_list, Timestamp) of
-		false ->
+	case ar_tx_replay_pool:verify_block_txs(
+		TXs, Diff, Height - 1, Timestamp, OldB#block.wallet_list, BlockTXPairs
+	) of
+		invalid ->
 			{invalid, invalid_txs};
-		true ->
-			validate_block(tx_root, {BI, WalletList, NewB, TXs, OldB})
+		valid ->
+			validate_block(tx_root, {BI, NewB, OldB})
 	end;
-validate_block(tx_root, {BI, WalletList, NewB, TXs, OldB}) ->
-	case ar_block:verify_tx_root(NewB#block { txs = TXs }) of
+validate_block(tx_root, {BI, NewB, OldB}) ->
+	case ar_block:verify_tx_root(NewB) of
 		false ->
 			{invalid, invalid_tx_root};
 		true ->
-			validate_block(weave_size, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(weave_size, {BI, NewB, OldB})
 	end;
-validate_block(weave_size, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(weave_size, {BI, #block{ txs = TXs } = NewB, OldB}) ->
 	case ar_block:verify_weave_size(NewB, OldB, TXs) of
 		false ->
 			{invalid, invalid_weave_size};
 		true ->
-			validate_block(block_index_root, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(block_index_root, {BI, NewB, OldB})
 	end;
-validate_block(block_index_root, {BI, WalletList, NewB, TXs, OldB}) ->
+validate_block(block_index_root, {BI, NewB, OldB}) ->
 	case ar_block:verify_block_hash_list_merkle(NewB, OldB, BI) of
 		false ->
 			{invalid, invalid_block_index_root};
 		true ->
-			validate_block(last_retarget, {BI, WalletList, NewB, TXs, OldB})
+			validate_block(last_retarget, {NewB, OldB})
 	end;
-validate_block(last_retarget, {_BI, _WalletList, NewB, _TXs, OldB}) ->
+validate_block(last_retarget, {NewB, OldB}) ->
 	case ar_block:verify_last_retarget(NewB, OldB) of
 		false ->
 			{invalid, invalid_last_retarget};
 		true ->
 			valid
 	end.
-
-validate_pre_fork_2_0(_, _, NewB, _, _, _RecallB = unavailable, _, _) ->
-	ar:info([{recall_block_unavailable, ar_util:encode(NewB#block.indep_hash)}]),
-	{invalid, [recall_block_unavailable]};
-validate_pre_fork_2_0(
-		BI,
-		WalletList,
-		NewB =
-			#block {
-				wallet_list = WalletList,
-				nonce = Nonce,
-				diff = Diff,
-				timestamp = Timestamp,
-				height = Height
-			},
-		TXs,
-		OldB,
-		RecallB,
-		RewardAddr,
-		Tags) ->
-	ar:d([performing_v1_block_validation, {height, Height}]),
-	BDSHash = ar_weave:hash(
-		ar_block:generate_block_data_segment_pre_2_0(OldB, RecallB, TXs, RewardAddr, Timestamp, Tags),
-		Nonce,
-		Height
-	),
-	Mine = ar_mine:validate(BDSHash, Diff, Height),
-	Wallet = validate_wallet_list(WalletList),
-	IndepRecall = ar_weave:verify_indep(RecallB, BI),
-	Txs = ar_tx:verify_txs(TXs, Diff, Height - 1, OldB#block.wallet_list, Timestamp),
-	DiffCheck = ar_retarget:validate_difficulty(NewB, OldB),
-	IndepHash = ar_block:verify_indep_hash(NewB),
-	Hash = ar_block:verify_dep_hash(NewB, BDSHash),
-	WeaveSize = ar_block:verify_weave_size(NewB, OldB, TXs),
-	Size = ar_block:block_field_size_limit(NewB),
-	HeightCheck = ar_block:verify_height(NewB, OldB),
-	RetargetCheck = ar_block:verify_last_retarget(NewB, OldB),
-	PreviousBCheck = ar_block:verify_previous_block(NewB, OldB),
-	HLCheck = ar_block:verify_block_hash_list(NewB, OldB),
-	HLMerkleCheck = ar_block:verify_block_hash_list_merkle(NewB, OldB, noop),
-	WalletListCheck = ar_block:verify_wallet_list(NewB, OldB, RecallB, TXs),
-	CumulativeDiffCheck = ar_block:verify_cumulative_diff(NewB, OldB),
-
-	ar:info(
-		[
-			{block_validation_results, ar_util:encode(NewB#block.indep_hash)},
-			{height, NewB#block.height},
-			{block_mine_validate, Mine},
-			{block_data_segment_hash, BDSHash},
-			{block_wallet_validate, Wallet},
-			{block_indep_validate, IndepRecall},
-			{block_txs_validate, Txs},
-			{block_diff_validate, DiffCheck},
-			{block_indep, IndepHash},
-			{block_hash, Hash},
-			{weave_size, WeaveSize},
-			{block_size, Size},
-			{block_height, HeightCheck},
-			{block_retarget_time, RetargetCheck},
-			{block_previous_check, PreviousBCheck},
-			{block_hash_list, HLCheck},
-			{block_wallet_list, WalletListCheck},
-			{block_cumulative_diff, CumulativeDiffCheck},
-			{hash_list_merkle, HLMerkleCheck}
-		]
-	),
-
-	case IndepRecall of
-		false ->
-			ar:info(
-				[
-					{encountered_invalid_recall_block, ar_util:encode(RecallB#block.indep_hash)},
-					moving_to_invalid_block_directory
-				]
-			),
-			ar_storage:invalidate_block(RecallB);
-		_ ->
-			ok
-	end,
-
-	case Mine of false -> ar:info({invalid_nonce, BDSHash}); _ -> ok end,
-	case Wallet of false -> ar:info(invalid_wallet_list); _ -> ok end,
-	case Txs of false -> ar:info(invalid_txs); _ -> ok end,
-	case DiffCheck of false -> ar:info(invalid_difficulty); _ -> ok end,
-	case IndepHash of false -> ar:info(invalid_indep_hash); _ -> ok end,
-	case Hash of false -> ar:info(invalid_dependent_hash); _ -> ok end,
-	case WeaveSize of false -> ar:info(invalid_total_weave_size); _ -> ok end,
-	case Size of false -> ar:info(invalid_size); _ -> ok end,
-	case HeightCheck of false -> ar:info(invalid_height); _ -> ok end,
-	case RetargetCheck of false -> ar:info(invalid_retarget); _ -> ok end,
-	case PreviousBCheck of false -> ar:info(invalid_previous_block); _ -> ok end,
-	case HLCheck of false -> ar:info(invalid_hash_list); _ -> ok end,
-	case WalletListCheck of false -> ar:info(invalid_wallet_list_rewards); _ -> ok end,
-	case CumulativeDiffCheck of false -> ar:info(invalid_cumulative_diff); _ -> ok end,
-	case HLMerkleCheck of false -> ar:info(invalid_hash_list_merkle); _ -> ok end,
-
-	Valid = (Mine
-		andalso Wallet
-		andalso IndepRecall
-		andalso Txs
-		andalso DiffCheck
-		andalso IndepHash
-		andalso Hash
-		andalso WeaveSize
-		andalso Size
-		andalso HeightCheck
-		andalso RetargetCheck
-		andalso PreviousBCheck
-		andalso HLCheck
-		andalso WalletListCheck
-		andalso CumulativeDiffCheck
-		andalso HLMerkleCheck),
-	InvalidReasons = case Hash of
-		true -> [];
-		false -> [dep_hash]
-	end,
-	case Valid of
-		true ->
-			valid;
-		false ->
-			{invalid, InvalidReasons}
-	end;
-validate_pre_fork_2_0(_BI, WL, NewB = #block { hash_list = unset }, TXs, OldB, RecallB, _, _) ->
-	validate_pre_fork_2_0(unset, WL, NewB, TXs, OldB, RecallB, unclaimed, []);
-validate_pre_fork_2_0(BI, _WL, NewB = #block { wallet_list = undefined }, TXs, OldB, RecallB, _, _) ->
-	validate_pre_fork_2_0(BI, undefined, NewB, TXs, OldB, RecallB, unclaimed, []);
-validate_pre_fork_2_0(_BI, _WL, NewB, _TXs, _OldB, _RecallB, _, _) ->
-	ar:info([{block_not_accepted, ar_util:encode(NewB#block.indep_hash)}]),
-	{invalid, [hash_list_or_wallet_list]}.
-
-%% @doc Ensure that all wallets in the wallet list have a positive balance.
-validate_wallet_list([]) ->
-	true;
-validate_wallet_list([{_, 0, Last} | _]) when byte_size(Last) == 0 ->
-	false;
-validate_wallet_list([{_, Qty, _} | _]) when Qty < 0 ->
-	false;
-validate_wallet_list([_ | Rest]) ->
-	validate_wallet_list(Rest).
 
 %%%
 %%% Private functions.
@@ -689,7 +525,7 @@ do_apply_tx(
 		Height) ->
 	Addr = ar_wallet:to_address(From),
 	Fork_1_8 = ar_fork:height_1_8(),
-	case {Height, get_wallet_by_address(Addr, Wallets)} of
+	case {Height, ar_patricia_tree:get(Addr, Wallets)} of
 		{H, {Addr, _, _}} when H >= Fork_1_8 ->
 			do_apply_tx(Wallets, TX);
 		{_, {Addr, _, Last}} ->
@@ -697,11 +533,6 @@ do_apply_tx(
 		_ ->
 			Wallets
 	end.
-
-get_wallet_by_address(Addr, WalletList) when is_list(WalletList) ->
-	lists:keyfind(Addr, 1, WalletList);
-get_wallet_by_address(Addr, WalletMap) when is_map(WalletMap) ->
-	maps:get(Addr, WalletMap, false).
 
 do_apply_tx(WalletList, TX) ->
 	update_recipient_balance(
@@ -718,27 +549,16 @@ update_sender_balance(
 			reward = Reward
 		}) ->
 	Addr = ar_wallet:to_address(From),
-	case get_wallet_by_address(Addr, Wallets) of
+	case ar_patricia_tree:get(Addr, Wallets) of
 		{_, Balance, _} ->
-			update_wallet(
+			ar_patricia_tree:insert(
 				Addr,
 				{Addr, Balance - (Qty + Reward), ID},
 				Wallets
 			);
-
 		_ ->
 			Wallets
 	end.
-
-update_wallet(Addr, Wallet, WalletList) when is_list(WalletList) ->
-	lists:keyreplace(
-		Addr,
-		1,
-		WalletList,
-		Wallet
-	);
-update_wallet(Addr, Wallet, WalletMap) when is_map(WalletMap) ->
-	maps:put(Addr, Wallet, WalletMap).
 
 update_recipient_balance(Wallets, #tx { quantity = 0 }) ->
 	Wallets;
@@ -748,31 +568,57 @@ update_recipient_balance(
 			target = To,
 			quantity = Qty
 		}) ->
-	case get_wallet_by_address(To, Wallets) of
-		false ->
-			insert_wallet(To, {To, Qty, <<>>}, Wallets);
+	case ar_patricia_tree:get(To, Wallets) of
+		not_found ->
+			ar_patricia_tree:insert(To, {To, Qty, <<>>}, Wallets);
 		{To, OldBalance, LastTX} ->
-			update_wallet(To, {To, OldBalance + Qty, LastTX}, Wallets)
+			ar_patricia_tree:insert(To, {To, OldBalance + Qty, LastTX}, Wallets)
 	end.
-
-insert_wallet(_Addr, Wallet, WalletList) when is_list(WalletList) ->
-	[Wallet | WalletList];
-insert_wallet(Addr, Wallet, WalletMap) when is_map(WalletMap) ->
-	maps:put(Addr, Wallet, WalletMap).
 
 %% @doc Alter a wallet in a wallet list.
 alter_wallet(WalletList, Target, Adjustment) ->
-	case lists:keyfind(Target, 1, WalletList) of
-		false ->
-			[{Target, Adjustment, <<>>}|WalletList];
+	case ar_patricia_tree:get(Target, WalletList) of
+		not_found ->
+			ar_patricia_tree:insert(Target, {Target, Adjustment, <<>>}, WalletList);
 		{Target, Balance, LastTX} ->
-			lists:keyreplace(
+			ar_patricia_tree:insert(
 				Target,
-				1,
-				WalletList,
-				{Target, Balance + Adjustment, LastTX}
+				{Target, Balance + Adjustment, LastTX},
+				WalletList
 			)
 	end.
+
+-ifdef(DEBUG).
+is_wallet_invalid(#tx{ signature = <<>> }, _WalletList) ->
+	false;
+is_wallet_invalid(#tx{ owner = Owner }, WalletList) ->
+	Address = ar_wallet:to_address(Owner),
+	case ar_patricia_tree:get(Address, WalletList) of
+		{Address, Balance, LastTX} when Balance >= 0 ->
+			case Balance of
+				0 ->
+					byte_size(LastTX) == 0;
+				_ ->
+					false
+			end;
+		_ ->
+			true
+	end.
+-else.
+is_wallet_invalid(#tx{ owner = Owner }, WalletList) ->
+	Address = ar_wallet:to_address(Owner),
+	case ar_patricia_tree:get(Address, WalletList) of
+		{Address, Balance, LastTX} when Balance >= 0 ->
+			case Balance of
+				0 ->
+					byte_size(LastTX) == 0;
+				_ ->
+					false
+			end;
+		_ ->
+			true
+	end.
+-endif.
 
 %% @doc Calculate the total mining reward for a block and its associated TXs.
 calculate_reward(Height, Quantity) ->
@@ -843,3 +689,30 @@ drop_invalid_txs(TXs) ->
 		end,
 		TXs
 	).
+
+update_wallet_list(NextB, WalletList, RewardPool, Height) ->
+	TXs = NextB#block.txs,
+	{FinderReward, NewRewardPool} =
+		ar_node_utils:calculate_reward_pool(
+			RewardPool,
+			TXs,
+			NextB#block.reward_addr,
+			no_recall,
+			NextB#block.weave_size,
+			NextB#block.height,
+			NextB#block.diff,
+			NextB#block.timestamp
+		),
+	case NextB#block.reward_pool of
+		NewRewardPool ->
+			NewWalletList =
+				ar_node_utils:apply_mining_reward(
+					ar_node_utils:apply_txs(WalletList, TXs, Height),
+					NextB#block.reward_addr,
+					FinderReward,
+					NextB#block.height
+				),
+			{ok, NewWalletList};
+		_ ->
+			{error, invalid_reward_pool}
+	end.
