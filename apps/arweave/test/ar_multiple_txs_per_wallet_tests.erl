@@ -639,6 +639,7 @@ joins_network_successfully() ->
 	TX1 = sign_tx(Key, #{ last_tx => element(1, lists:nth(?MAX_TX_ANCHOR_DEPTH + 1, BI)) }),
 	{ok, {{<<"400">>, _}, _, <<"Invalid anchor (last_tx).">>, _, _}} =
 		post_tx_to_master(Master, TX1),
+	disconnect_from_slave(),
 	TX2 = sign_tx(Key, #{ last_tx => element(1, lists:nth(?MAX_TX_ANCHOR_DEPTH, BI)) }),
 	assert_post_tx_to_master(Master, TX2),
 	%% Expect transactions to be on master.
@@ -673,7 +674,6 @@ joins_network_successfully() ->
 		end,
 		TXs
 	),
-	disconnect_from_slave(),
 	TX3 = sign_tx(Key, #{ last_tx => element(1, lists:nth(?MAX_TX_ANCHOR_DEPTH, BI)) }),
 	assert_post_tx_to_slave(Slave, TX3),
 	slave_mine(Slave),

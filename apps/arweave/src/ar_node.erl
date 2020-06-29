@@ -12,7 +12,7 @@
 -export([get_peers/1]).
 -export([get_wallet_list/1]).
 -export([get_block_index/1, get_height/1]).
--export([get_trusted_peers/1]).
+-export([get_trusted_peers/1, set_trusted_peers/2]).
 -export([get_balance/2]).
 -export([get_last_tx/2]).
 -export([get_current_diff/1, get_diff/1]).
@@ -307,6 +307,10 @@ get_trusted_peers(Proc) when is_pid(Proc) ->
 	end;
 get_trusted_peers(_) ->
 	unavailable.
+
+%% @doc Set trusted peers.
+set_trusted_peers(Proc, Peers) when is_pid(Proc) ->
+	Proc ! {set_trusted_peers, Peers}.
 
 %% @doc Get the list of peers from the nodes gossip state.
 %% This is the list of peers that node will request blocks/txs from and will
@@ -678,6 +682,8 @@ handle(SPid, {get_trusted_peers, From, Ref}) ->
 	{ok, TrustedPeers} = ar_node_state:lookup(SPid, trusted_peers),
 	From ! {Ref, peers, TrustedPeers},
 	ok;
+handle(SPid, {set_trusted_peers, Peers}) ->
+	ar_node_state:update(SPid, [{trusted_peers, Peers}]);
 handle(SPid, {get_walletlist, From, Ref}) ->
 	{ok, WalletList} = ar_node_state:lookup(SPid, wallet_list),
 	From ! {Ref, walletlist, WalletList},

@@ -128,7 +128,10 @@ disconnect_from_slave() ->
 	SlaveBridge = slave_call(erlang, whereis, [http_bridge_node]),
 	slave_call(ar_bridge, set_remote_peers, [SlaveBridge, []]),
 	MasterBridge = whereis(http_bridge_node),
-	ar_bridge:set_remote_peers(MasterBridge, []).
+	ar_bridge:set_remote_peers(MasterBridge, []),
+	ar_node:set_trusted_peers(whereis(http_entrypoint_node), []),
+	SlaveNode = slave_call(erlang, whereis, [http_entrypoint_node]),
+	slave_call(ar_node, set_trusted_peers, [SlaveNode, []]).
 
 gossip(off, Node) ->
 	ar_node:set_loss_probability(Node, 1);
