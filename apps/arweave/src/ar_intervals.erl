@@ -4,7 +4,6 @@
 	new/0,
 	add/3,
 	cut/2,
-	delete/3,
 	is_inside/2,
 	sum/1,
 	outerjoin/2,
@@ -60,9 +59,6 @@ safe_from_etf(Binary) ->
 		_ ->
 			{error, invalid}
 	end.
-
-delete(Intervals, DeleteEnd, DeleteStart) ->
-	ar_intervals:outerjoin(gb_sets:from_list([{DeleteEnd, DeleteStart}]), Intervals).
 
 %%%===================================================================
 %%% Private functions.
