@@ -765,8 +765,8 @@ do_init([{_, WeaveSize, _} | _] = BI, BlockQueue) ->
 		disk_pool_cursor = first,
 		status = joined
 	},
-	{UpdatedState, NewBI, CurrentWeaveSize} = case read_data_sync_state() of
-		{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize, BlackListedRecord}} ->
+	{UpdatedState, NewBI, CurrentWeaveSize} = case ar_storage:read_term(data_sync_state) of
+		{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize}} ->
 			%% Filter out the keys with the invalid values, if any, produced by a bug in 2.1.0.0.
 			DiskPoolDataRoots = maps:filter(
 				fun (_, {_, _, _}) ->
@@ -780,7 +780,6 @@ do_init([{_, WeaveSize, _} | _] = BI, BlockQueue) ->
 				{ok, full_intersection, ExtraBI} ->
 					State2 = State#sync_data_state{
 						sync_record = SyncRecord,
-						black_listed_record = BlackListedRecord,
 						disk_pool_data_roots = DiskPoolDataRoots,
 						disk_pool_size = DiskPoolSize
 					},
@@ -798,7 +797,6 @@ do_init([{_, WeaveSize, _} | _] = BI, BlockQueue) ->
 						),
 					State2 = State#sync_data_state{
 						sync_record = ar_intervals:cut(SyncRecord, Offset),
-						black_listed_record = BlackListedRecord,
 						disk_pool_data_roots = UpdatedDiskPoolDataRoots,
 						disk_pool_size = DiskPoolSize
 					},
@@ -1188,13 +1186,12 @@ store_sync_state(
 		sync_record = SyncRecord,
 		disk_pool_data_roots = DiskPoolDataRoots,
 		disk_pool_size = DiskPoolSize,
-		block_index = BI,
-		black_listed_record = BlackListedRecord
+		block_index = BI
 	}
 ) ->
 	prometheus_gauge:set(v2_index_data_size, ar_intervals:sum(SyncRecord)),
 	ar_metrics:store(disk_pool_chunks_count),
-	ar_storage:write_term(data_sync_state, {SyncRecord, BI, DiskPoolDataRoots, DiskPoolSize, BlackListedRecord}).
+	ar_storage:write_term(data_sync_state, {SyncRecord, BI, DiskPoolDataRoots, DiskPoolSize}).
 
 pick_random_peers(Peers, N, M) ->
 	lists:sublist(
@@ -1501,14 +1498,4 @@ next({TXRootMapIterator, {TXRoot, OffsetMapIterator}}) ->
 		{Offset, TXPath, UpdatedOffsetMapIterator} ->
 			UpdatedIterator = {TXRootMapIterator, {TXRoot, UpdatedOffsetMapIterator}},
 			{{TXRoot, Offset, TXPath}, UpdatedIterator}
-	end.
-
-read_data_sync_state() ->
-	case ar_storage:read_term(data_sync_state) of
-		{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize}} ->
-			{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize, ar_intervals:new()}};
-		{ok, {_SyncRecord, _LastStoredBI, _RawDiskPoolDataRoots, _DiskPoolSize, _BlackListedRecord}} = Res ->
-			Res;
-		Res ->
-			Res
 	end.
