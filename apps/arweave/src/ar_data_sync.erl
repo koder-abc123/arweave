@@ -765,7 +765,7 @@ do_init([{_, WeaveSize, _} | _] = BI, BlockQueue) ->
 		disk_pool_cursor = first,
 		status = joined
 	},
-	{UpdatedState, NewBI, CurrentWeaveSize} = case ar_storage:read_term(data_sync_state) of
+	{UpdatedState, NewBI, CurrentWeaveSize} = case read_data_sync_state() of
 		{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize, BlackListedRecord}} ->
 			%% Filter out the keys with the invalid values, if any, produced by a bug in 2.1.0.0.
 			DiskPoolDataRoots = maps:filter(
@@ -1501,4 +1501,14 @@ next({TXRootMapIterator, {TXRoot, OffsetMapIterator}}) ->
 		{Offset, TXPath, UpdatedOffsetMapIterator} ->
 			UpdatedIterator = {TXRootMapIterator, {TXRoot, UpdatedOffsetMapIterator}},
 			{{TXRoot, Offset, TXPath}, UpdatedIterator}
+	end.
+
+read_data_sync_state() ->
+	case ar_storage:read_term(data_sync_state) of
+		{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize}} ->
+			{ok, {SyncRecord, LastStoredBI, RawDiskPoolDataRoots, DiskPoolSize, ar_intervals:new()}};
+		{ok, {_SyncRecord, _LastStoredBI, _RawDiskPoolDataRoots, _DiskPoolSize, _BlackListedRecord}} = Res ->
+			Res;
+		Res ->
+			Res
 	end.
