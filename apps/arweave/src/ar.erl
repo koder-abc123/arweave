@@ -279,7 +279,8 @@ start(#config{
 		max_miners = MaxMiners,
 		disable = Disable,
 		enable = Enable,
-		randomx_bulk_hashing_iterations = RandomXBulkHashingIterations
+		randomx_bulk_hashing_iterations = RandomXBulkHashingIterations,
+		diff = Diff
 	}) ->
 	error_logger:logfile({open, generate_logfile_name()}),
 	error_logger:tty(false),
@@ -289,6 +290,7 @@ start(#config{
 	ar_meta_db:put(max_miners, MaxMiners),
 	ar_meta_db:put(mine, true),
 	ar_meta_db:put(randomx_bulk_hashing_iterations, RandomXBulkHashingIterations),
+	ar_meta_db:put(diff, Diff),
 	ar_randomx_state:start(),
 	ar_benchmark:run();
 start(

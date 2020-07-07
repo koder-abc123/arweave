@@ -23,7 +23,7 @@ run() ->
 	loop({0, 0}, initial_diff()).
 
 initial_diff() ->
-	Diff = ar_retarget:switch_to_linear_diff(20 + ?RANDOMX_DIFF_ADJUSTMENT),
+	Diff = ar_retarget:switch_to_linear_diff(ar_meta_db:get(diff)),
 	{_, TimeSpent} = mine(Diff, 10),
 	%% The initial difficulty might be too easy
 	%% for the machine so we mine 10 blocks and
