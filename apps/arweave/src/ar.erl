@@ -271,7 +271,7 @@ start(Port) when is_integer(Port) -> start(#config { port = Port });
 start(#config{ benchmark = true, max_miners = MaxMiners, disable = Disable, enable = Enable }) ->
 	error_logger:logfile({open, generate_logfile_name()}),
 	error_logger:tty(false),
-	ar_meta_db:start(),
+	ar_meta_db:start_link(),
 	lists:foreach(fun(Feature) -> ar_meta_db:put(Feature, false) end, Disable),
 	lists:foreach(fun(Feature) -> ar_meta_db:put(Feature, true) end, Enable),
 	ar_meta_db:put(max_miners, MaxMiners),
