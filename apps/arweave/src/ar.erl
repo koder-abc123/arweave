@@ -231,6 +231,8 @@ parse_cli_args(["start_from_block_index"|Rest], C) ->
 	parse_cli_args(Rest, C#config { start_from_block_index = true });
 parse_cli_args(["benchmark"|Rest], C)->
 	parse_cli_args(Rest, C#config { benchmark = true });
+parse_cli_args(["diff", Diff|Rest], C)->
+	parse_cli_args(Rest, C#config { diff = list_to_integer(Diff) });
 parse_cli_args(["internal_api_secret", Secret | Rest], C) when length(Secret) >= ?INTERNAL_API_SECRET_MIN_LEN ->
 	parse_cli_args(Rest, C#config { internal_api_secret = list_to_binary(Secret)});
 parse_cli_args(["internal_api_secret", _ | _], _) ->
